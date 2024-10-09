@@ -1,118 +1,91 @@
-import numpy as np
-import pandas as pd 
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.model_selection import KFold
-from sklearn.model_selection import cross_val_score
-from sklearn.model_selection import GridSearchCV
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.pipeline import Pipeline, FeatureUnion
-from sklearn.preprocessing import StandardScaler
-from sklearn.preprocessing import OneHotEncoder
-from abc import ABC, abstractmethod
-from sklearn.svm import SVC
-from pathlib import Path
-from CLD import *
-from sklearn.metrics import roc_auc_score
-from sklearn.metrics import accuracy_score
-from datetime import datetime
-from EHD import *
-from CEDD import *
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset, random_split
 
-def get_filepaths(import_path, name):
-    # use path module for Windows; adjust for Linux
-    # path = Path(sys.argv[2])
-    path = Path(import_path+'/'+name)
-    # creats an array of file paths in directory
-    files = path.glob('*')
-    fnames = list(files)
-    length = len(fnames)
-    fpaths = []
-    for f in range(length):
-        curr_fname = str(fnames[f].parent) + '/' + str(fnames[f].name)
-        fpaths.append(curr_fname)
-    return fpaths
+# Define a simple neural network model
+class SimpleNet(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(SimpleNet, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, output_size)
+        self.softmax = nn.Softmax(dim=1)
 
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return self.softmax(x)
 
-def load_data(import_path):
-    # store features
-    im_features = []
-    im_labels = []
-    folders = ['adobe', 'alibaba'
-                ,
-                'amazon', 'apple', 'boa', 'chase', 'dhl'
-                'dropbox', 'facebook', 'linkedin', 'microsoft', 'other',
-                'paypal', 'wellsfargo', 'yahoo'
-               ]
-    for name in folders:
-        fpaths = get_filepaths(import_path, name)
-        for fp in fpaths:
-            curr_cld = cld_main(fp)
-            curr_ehd = ehdimage(fp)
-            curr_cedd = cedd(fp)
-            features = np.concatenate((curr_cld, curr_ehd, curr_cedd))
-            im_features.append(features)
-            if name=='other':
-                label = 1
-            else:
-                label = 0
-            im_labels.append(label)
-    return im_features, im_labels
+def prepare_data(features, labels, test_size=0.15, batch_size=32):
+    # Convert data to PyTorch tensors
+    X = torch.tensor(features, dtype=torch.float32)
+    y = torch.tensor(labels, dtype=torch.long)
 
+    # Create a dataset and split into training and test sets
+    dataset = TensorDataset(X, y)
+    train_size = int((1 - test_size) * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-def main(X, y, exp_log):
-    
-    # store datasets in dictionary 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.15)
+    # Create data loaders for training and testing
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    classifiers = [
-        LogisticRegression(max_iter=400)     
-        ,SVC()
-        ]
-    
-    names = [
-        'LogisticRegression'
-        ,'SVC'
-        ]
-    
-    parameters = [
-        {'LogisticRegression__C': (0.001, 0.01, 0.1, 1)},
-        {'SVC__C': (0.001, 0.01, 0.1, 1)}
-        ]
-    
-    
-    for name, classifier, parameter in zip(names, classifiers, parameters):
-        pipe = Pipeline([
-            ('scaler', StandardScaler()),
-            (name, classifier)
-            ])
-        
-        grid = GridSearchCV(pipe, param_grid=parameter, n_jobs=-1)
-        clf_grid = grid.fit(X_train, y_train)
-        score = clf_grid.score(X_test, y_test)
-        # identify best estimator
-        best_clf = clf_grid.best_estimator_
-        
-        # fit using best estimator
-        train_time_start = datetime.now()
-        model = best_clf.fit(X_train, y_train)
-        train_time_end = datetime.now()
-        
-        exp_log.loc[len(exp_log)] = [f"Baseline_features_{name}",
-                                     accuracy_score(y_train, model.predict(X_train)), 
-                                     #accuracy_score(y_valid, model.predict(X_valid)),
-                                     accuracy_score(y_test, model.predict(X_test)),
-                                     '--',#roc_auc_score(y_train, model.predict_proba(X_train)[:, 1]), 
-                                     '--'#roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]),
-                                     ]
+    return train_loader, test_loader
 
+def train_model(model, train_loader, criterion, optimizer, epochs=10):
+    model.train()
+    for epoch in range(epochs):
+        running_loss = 0.0
+        for inputs, labels in train_loader:
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
 
-exp_log = pd.DataFrame(columns=["ExpID", "Train Acc", "Test Acc", "Train AUC", "Test AUC"])
+        print(f"Epoch {epoch + 1}/{epochs}, Loss: {running_loss/len(train_loader)}")
 
+def evaluate_model(model, test_loader):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    accuracy = 100 * correct / total
+    print(f'Test Accuracy: {accuracy:.2f}%')
+    return accuracy
+
+# Load the features and labels
 import_path = 'phishIRIS_DL_Dataset/phishIRIS_DL_Dataset/train'
-name = 'adobe'
-
 feat, labels = load_data(import_path)
-model = main(X=feat, y=labels, exp_log=exp_log)
+
+# Prepare data for PyTorch
+train_loader, test_loader = prepare_data(feat, labels)
+
+# Define model, loss function, and optimizer
+input_size = len(feat[0])  # Number of input features
+hidden_size = 64          # Number of neurons in the hidden layer
+output_size = 2           # Number of classes (phish or not)
+model = SimpleNet(input_size, hidden_size, output_size)
+
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# Train the model
+train_model(model, train_loader, criterion, optimizer, epochs=10)
+
+# Evaluate the model
+test_accuracy = evaluate_model(model, test_loader)
+
+# Log the result
+exp_log.loc[len(exp_log)] = ['PyTorch_Model', '--', test_accuracy, '--', '--']
 print(exp_log)
